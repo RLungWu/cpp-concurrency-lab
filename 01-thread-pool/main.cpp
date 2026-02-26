@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include <chrono>
+#include <atomic>
 
 const int MAX_THREADS = std::thread::hardware_concurrency() / 2;
 
@@ -17,6 +18,7 @@ private:
   std::mutex mtx;
   std::condition_variable cv;
   bool stop = false;
+  std::atomic<size_t> active_tasks{0};
   
   void worker_thread(){
     while(true){
@@ -26,7 +28,10 @@ private:
       auto task = tasks.front();
       tasks.pop();
       lock.unlock();
+      active_tasks++;
       task();
+      active_tasks--;
+      cv.notify_all();
     }
   };
 public:
@@ -57,23 +62,29 @@ public:
     }
     cv.notify_one();
   };
+
+  void wait(){
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [this]{return active_tasks == 0 && tasks.empty();});
+  };
 };  
 
 int main() {
-  ThreadPool* pool = new ThreadPool(4);
+  ThreadPool pool(MAX_THREADS);
   std::cout << "ThreadPool created with " << MAX_THREADS << " threads." << std::endl;
 
   auto start = std::chrono::high_resolution_clock::now();
   
-  for (int i = 0; i < 10; i++) {
-    pool->push_task([](){
+  for (int i = 0; i < 1000; i++) {
+    pool.push_task([](){
       // std::this_thread::sleep_for(std::chrono::milliseconds(100));
       volatile long long sum = 0;
       for (int i = 0; i < 1000000; i++) sum += i;
     });
   }
 
-  delete pool;
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  pool.wait();
 
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> diff = end - start;
@@ -82,7 +93,7 @@ int main() {
 
   auto start2 = std::chrono::high_resolution_clock::now();
   
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 1000; i++) {
     // std::this_thread::sleep_for(std::chrono::milliseconds(100));
     volatile long long sum = 0;
     for (int i = 0; i < 1000000; i++) sum += i;
