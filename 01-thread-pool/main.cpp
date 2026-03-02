@@ -9,7 +9,7 @@
 #include <chrono>
 #include <atomic>
 
-const int MAX_THREADS = std::thread::hardware_concurrency() / 2;
+const size_t MAX_THREADS = std::max(1u, std::thread::hardware_concurrency());
 
 class ThreadPool {
 private:
@@ -27,8 +27,8 @@ private:
       if (stop && tasks.empty()) return;
       auto task = tasks.front();
       tasks.pop();
-      lock.unlock();
       active_tasks++;
+      lock.unlock();
       task();
       active_tasks--;
       cv.notify_all();
@@ -36,11 +36,6 @@ private:
   };
 public:
   ThreadPool(std::size_t threads_num) {
-    if (threads_num > MAX_THREADS) {
-      threads_num = MAX_THREADS;
-      std::cout << "Thread pool size is too large, set to " << MAX_THREADS << std::endl;
-    }
-
     this->workers.reserve(threads_num);
     for (size_t i = 0; i < threads_num; i++) {
       this->workers.push_back(std::thread(&ThreadPool::worker_thread, this));
@@ -48,8 +43,12 @@ public:
   };
   
   ~ThreadPool(){
-    this->stop = true;
-    this->cv.notify_all();
+    // this->stop = true;
+    {
+      std::lock_guard<std::mutex> lock(mtx);
+      stop = true;
+    }
+    cv.notify_all();
     for (auto& worker : workers){
       worker.join();
     }
@@ -58,7 +57,8 @@ public:
   void push_task(std::function<void()> task){
     {
       std::lock_guard<std::mutex> lock(mtx);
-      tasks.push(task);
+      if (stop) throw std::runtime_error("ThreadPool is stopped");
+      tasks.push(std::move(task));
     }
     cv.notify_one();
   };
@@ -67,41 +67,57 @@ public:
     std::unique_lock<std::mutex> lock(mtx);
     cv.wait(lock, [this]{return active_tasks == 0 && tasks.empty();});
   };
-};  
+}; 
+
+double benchmark(std::function<void()> fn, int warmup = 3, int runs = 10) {
+    // 1. Warm-up：讓 cache 和 thread 進入穩定狀態
+    for (int i = 0; i < warmup; i++) fn();
+
+    // 2. 多次測量
+    std::vector<double> results;
+    for (int i = 0; i < runs; i++) {
+        auto start = std::chrono::high_resolution_clock::now();
+        fn();
+        auto end = std::chrono::high_resolution_clock::now();
+        results.push_back(std::chrono::duration<double>(end - start).count());
+    }
+
+    // 3. 取中位數（比平均值更穩定，不受極端值影響）
+    std::sort(results.begin(), results.end());
+    return results[runs / 2];
+}
+
+void run_benchmark(int num_threads, int num_tasks, int task_workload) {
+    ThreadPool pool(num_threads);
+
+    auto fn = [&]() {
+        for (int i = 0; i < num_tasks; i++) {
+            pool.push_task([task_workload]() {
+                volatile long long sum = 0;
+                for (int i = 0; i < task_workload; i++) sum += i;
+            });
+        }
+        pool.wait();
+    };
+
+    double median_time = benchmark(fn);
+    double throughput = num_tasks / median_time;
+
+    std::cout << "threads=" << num_threads
+              << " tasks=" << num_tasks
+              << " workload=" << task_workload
+              << " → " << throughput << " tasks/sec"
+              << " (median: " << median_time << "s)\n";
+}
 
 int main() {
-  ThreadPool pool(MAX_THREADS);
-  std::cout << "ThreadPool created with " << MAX_THREADS << " threads." << std::endl;
-
-  auto start = std::chrono::high_resolution_clock::now();
-  
-  for (int i = 0; i < 1000; i++) {
-    pool.push_task([](){
-      // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      volatile long long sum = 0;
-      for (int i = 0; i < 1000000; i++) sum += i;
-    });
+  for (int workload: {100, 1000, 10000, 100000, 1000000}){
+    run_benchmark(4, 1000, workload);
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  pool.wait();
-
-  auto end = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double> diff = end - start;
-  std::cout << "Run time: " << diff.count() << " seconds" << std::endl;
-
-
-  auto start2 = std::chrono::high_resolution_clock::now();
-  
-  for (int i = 0; i < 1000; i++) {
-    // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    volatile long long sum = 0;
-    for (int i = 0; i < 1000000; i++) sum += i;
+  for (int threads: {1, 2, 4, 8, 16, 32}){
+    run_benchmark(threads, 1000, 1000);
   }
-
-  auto end2 = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double> diff2 = end2 - start2;
-  std::cout << "Run time: " << diff2.count() << " seconds" << std::endl;
 
   return 0;
 }
