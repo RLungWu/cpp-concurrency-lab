@@ -10,3 +10,5 @@ Built from scratch — no frameworks, no shortcuts.
 ## What I'm learning
 Not just how to use a thread pool —
 but why contention kills performance, and how design decisions change that.
+
+
